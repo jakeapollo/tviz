@@ -1,97 +1,117 @@
 # %%
-from typing import Any, Literal
+from typing import Literal
 
 import numpy as np
 import plotly.io as pio
+import torch
 from plotly import graph_objs as go
 from scipy import linalg
 
 pio.renderers.default = "browser"
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 
 # %%
-def create_matrix_family(
-    matrix: np.ndarray[float, Any], timesteps: int = 100
-) -> np.ndarray[float, Any]:
-    result = np.zeros((timesteps, matrix.shape[0], matrix.shape[1]))
-    log_M = linalg.logm(matrix)
+def create_matrix_family(matrix: torch.Tensor, timesteps: int = 100) -> torch.Tensor:
+    result = torch.zeros((timesteps, matrix.shape[0], matrix.shape[1]))
+    log_M = torch.tensor(linalg.logm(matrix.detach().numpy()))
     for i, a in enumerate(np.linspace(0, 1, timesteps)):
-        result[i] = linalg.expm(a * log_M)
+        result[i] = torch.linalg.matrix_exp(a * log_M)
     return result
 
 
-def apply_to_points(points: np.ndarray[float, Any], function: Any) -> np.ndarray[float, Any]:
-    return np.array([function(point) for point in points])
+# def apply_to_points(points: np.ndarray[float, Any], function: Any) -> np.ndarray[float, Any]:
+#     return np.array([function(point) for point in points])
 
 
-def create_axes(
-    xvals: np.ndarray[float, Any], yvals: np.ndarray[float, Any], npoints: int = 21
-) -> np.ndarray[float, Any]:
+def create_axes(xvals: torch.Tensor, yvals: torch.Tensor, npoints: int = 21) -> torch.Tensor:
     # return an array of size (len(xvals) + len(yvals), npoints, 2)
     # containing all the points in each line of the grid. There should be a line from ymin to ymax
     # for each xval, and a line from xmin to xmax for each yval.
-    xmin = np.min(xvals)
-    xmax = np.max(xvals)
-    xticks = np.linspace(xmin, xmax, npoints)
+    xmin = xvals.min()
+    xmax = xvals.max()
+    xticks = torch.linspace(xmin, xmax, npoints)
 
-    ymin = np.min(yvals)
-    ymax = np.max(yvals)
-    yticks = np.linspace(ymin, ymax, npoints)
+    ymin = yvals.min()
+    ymax = yvals.max()
+    yticks = torch.linspace(ymin, ymax, npoints)
 
     out = []
     for x in xvals:
-        out.append(np.array([[x, y] for y in yticks]))
+        out.append([[x, y] for y in yticks])
     for y in yvals:
-        out.append(np.array([[x, y] for x in xticks]))
-    return np.array(out)
+        out.append([[x, y] for x in xticks])
+
+    out = torch.tensor(out, device=device)
+    assert out.shape == (len(xvals) + len(yvals), npoints, 2)
+    return out
 
 
 def matrix_on_axes(
-    matrix: np.ndarray[float, Any],
-    axes: np.ndarray[float, Any],
+    matrix: torch.Tensor,
+    axes: torch.Tensor,
     timesteps: int = 101,
-) -> np.ndarray[float, Any]:
+) -> torch.Tensor:
     # matrix_family is an output of smooth_matrix_application
     # axes is an output of create_axes
     # output is an array of size (len(matrix_family), len(axes), 2)
     # The first index is timestep, the second is line index
-    matrix_family = create_matrix_family(matrix, timesteps=timesteps)
-    return np.einsum("tij, lnj -> tlni", matrix_family, axes)
+    matrix_family = create_matrix_family(matrix, timesteps=timesteps).to(device)
+    return torch.einsum("tij, lnj -> tlni", matrix_family, axes)
 
 
-def relu_family_on_axes(
-    axes: np.ndarray[float, Any], timesteps: int = 101
-) -> np.ndarray[float, Any]:
-    gradients = np.linspace(1, 0, timesteps)
-    out = np.zeros((timesteps, axes.shape[0], axes.shape[1], axes.shape[2]))
-    out[:, axes >= 0] = axes[axes > 0]
-    out[:, axes < 0] = gradients[:, None, None] * axes[axes < 0]
+def relu_family_on_axes(axes: torch.Tensor, timesteps: int = 101) -> torch.Tensor:
+    assert len(axes.shape) == 3
+    assert axes.shape[2] == 2
+    gradients = torch.linspace(1, 0, timesteps, device=device)
+    # out = torch.zeros((timesteps, axes.shape[0], axes.shape[1], axes.shape[2]), device=device)
+    # print(out.shape, axes.shape, gradients.shape)
+    # out[:, axes >= 0] = axes[axes > 0]
+    negative_mask = (axes < 0).float()
+    gradient_scale = torch.einsum("g, lnj -> glnj", gradients, negative_mask)
+    out = axes * gradient_scale
+    out[:, axes >= 0] = axes[axes >= 0]
+    out = out.to(device)
     return out
 
 
 def generate_axes_timeseries(
-    operations: list[np.ndarray[float, Any] | Literal["relu"]],
-    axes: np.ndarray[float, Any],
+    operations: list[torch.Tensor | Literal["relu"]],
+    axes: torch.Tensor,
     timesteps_per_operation: int = 101,
-) -> np.ndarray[float, Any]:
+) -> torch.Tensor:
     # operations is a list of matrices and "relu" strings. Each matrix is applied to the axes, and
     # each "relu" string is applied to the axes with a ReLU nonlinearity. The result is a timeseries
     # of axes.
-    out = [axes]
+    assert len(axes.shape) == 3
+    assert axes.shape[2] == 2
+    print(axes.shape)
+    out = axes.unsqueeze(0)
+    print(out.shape)
     for operation in operations:
         if operation == "relu":
-            out.append(relu_family_on_axes(out[-1], timesteps=timesteps_per_operation))
+            print("out-1", out[-1].shape)
+            out = torch.concatenate(
+                (out, relu_family_on_axes(out[-1], timesteps=timesteps_per_operation))
+            )
+            print(out.shape)
         else:
-            out.append(matrix_on_axes(operation, out[-1], timesteps=timesteps_per_operation))
-    return np.array(out)
+            assert isinstance(operation, torch.Tensor)
+            out = torch.concatenate(
+                (out, matrix_on_axes(operation, out[-1], timesteps=timesteps_per_operation))
+            )
+            print(out.shape)
+    return torch.tensor(out)
 
 
-def plot_axes_timeseries(axes_timeseries: np.ndarray[float, Any]) -> None:
+def plot_axes_timeseries(axes_timeseries: torch.Tensor) -> None:
     # axes_timeseries is an output of generate_axes_timeseries for each timestep (first axis), plot
     # all the lines (second axis) as defined by their points (third axis). Use plotly with an
     # interactive slider labeled by the timestep.
     fig = go.Figure()
     num_lines = len(axes_timeseries[0])
+    axes_timeseries = axes_timeseries.cpu().detach().numpy()
     for matrix in axes_timeseries:
         for line in matrix:
             x, y = line.T
@@ -113,20 +133,20 @@ def plot_axes_timeseries(axes_timeseries: np.ndarray[float, Any]) -> None:
         steps.append(step)
 
     sliders = [dict(active=0, currentvalue={"prefix": "Step: "}, steps=steps)]
-    fig.update_layout(sliders=sliders)
+    fig.update_layout(sliders=sliders, xaxis=dict(range=[-2, 2]), yaxis=dict(range=[-2, 2]))
 
     fig.show()
 
 
 # %%
-matrix = np.array([[1, 2], [-1, 1]])
-matrix_family = smooth_matrix_application(matrix, timesteps=200)
-xvals = np.linspace(-2, 2, 11)
-yvals = np.linspace(-2, 2, 11)
+xvals = torch.linspace(-10, 10, 11)
+yvals = torch.linspace(-10, 10, 11)
 axes = create_axes(xvals, yvals)
-axes_timeseries = matrix_on_axes(matrix_family, axes)
-plot_matrix_on_axes(axes_timeseries)
+matrix1 = torch.randn(2, 2)
+matrix2 = torch.randn(2, 2)
+axes_timeseries = generate_axes_timeseries([matrix1, "relu", matrix2], axes)
 
 # %%
-print(pio.renderers)
+plot_axes_timeseries(axes_timeseries)
+
 # %%
