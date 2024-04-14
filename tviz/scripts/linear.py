@@ -7,7 +7,8 @@ import torch
 from plotly import graph_objs as go
 from scipy import linalg
 
-pio.renderers.default = "browser"
+# render figures in jupyter notebook
+pio.renderers.default = "notebook"
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -25,7 +26,7 @@ def create_matrix_family(matrix: torch.Tensor, timesteps: int = 100) -> torch.Te
 #     return np.array([function(point) for point in points])
 
 
-def create_axes(xvals: torch.Tensor, yvals: torch.Tensor, npoints: int = 21) -> torch.Tensor:
+def create_axes(xvals: torch.Tensor, yvals: torch.Tensor, npoints: int = 51) -> torch.Tensor:
     # return an array of size (len(xvals) + len(yvals), npoints, 2)
     # containing all the points in each line of the grid. There should be a line from ymin to ymax
     # for each xval, and a line from xmin to xmax for each yval.
@@ -139,12 +140,14 @@ def plot_axes_timeseries(axes_timeseries: torch.Tensor) -> None:
 
 
 # %%
-xvals = torch.linspace(-10, 10, 11)
-yvals = torch.linspace(-10, 10, 11)
+xvals = torch.linspace(-3, 3, 21)
+yvals = torch.linspace(-3, 3, 21)
 axes = create_axes(xvals, yvals)
 matrix1 = torch.randn(2, 2)
+_, _, v1 = torch.svd(matrix1)
 matrix2 = torch.randn(2, 2)
-axes_timeseries = generate_axes_timeseries([matrix1, "relu", matrix2], axes)
+_, _, v2 = torch.svd(matrix2)
+axes_timeseries = generate_axes_timeseries([v1, "relu", v2], axes)
 
 # %%
 plot_axes_timeseries(axes_timeseries)
